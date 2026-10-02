@@ -1,0 +1,93 @@
+[project]
+name = "reinforcement-learning"
+version = "0.1.0"
+description = "Cluster-native Verifiers OSWorld environment experiments."
+readme = "README.md"
+requires-python = "~=3.12.0"
+dependencies = [
+    "pillow>=10.0",
+    "pydantic>=2.0",
+    "python-dotenv>=1.2.2",
+    "tomli-w>=1.2.0",
+    "verifiers>=0.2.0",
+]
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[tool.hatch.build.targets.wheel]
+packages = ["rl", "osworld_desktop_host"]
+exclude = ["deps/**"]
+
+[dependency-groups]
+dev = [
+    "mypy>=2.1.0",
+    "pre-commit>=4.6.0",
+    "prime-rl-configs",
+    "pytest>=9.1.1",
+    "pytest-asyncio>=0.23",
+    "ruff>=0.15.18",
+]
+
+[tool.uv.sources]
+prime-rl-configs = { path = "deps/prime-rl/packages/prime-rl-configs", editable = true }
+verifiers = { path = "deps/prime-rl/deps/verifiers", editable = true }
+
+[tool.ruff]
+line-length = 88
+extend-exclude = ["deps"]
+
+[tool.ruff.lint]
+ignore = [
+  "E501", # https://docs.astral.sh/ruff/faq/#is-the-ruff-linter-compatible-with-black
+  "N803", # https://docs.astral.sh/ruff/rules/invalid-argument-name
+  "N806", # https://docs.astral.sh/ruff/rules/non-lowercase-variable-in-function
+]
+select = [
+  # pyflakes
+  "F",
+  # pycodestyle
+  "E",
+  "W",
+  # isort
+  "I",
+  # pep8-naming
+  "N",
+  # pyupgrade
+  "UP",
+]
+
+[tool.ruff.lint.per-file-ignores]
+"experiments/synthetic_box_prompt_lab.py" = ["E402"]
+
+[tool.ruff.format]
+indent-style = "space"
+quote-style = "double"
+
+[tool.mypy]
+check_untyped_defs = true
+disallow_untyped_defs = true
+exclude = ["tests/", "experiments/", "deps/"]
+explicit_package_bases = true
+no_implicit_optional = true
+plugins = ["pydantic.mypy"]
+python_version = "3.12"
+warn_unused_ignores = true
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+norecursedirs = ["deps", ".venv", ".git", ".pytest_cache"]
+
+[[tool.mypy.overrides]]
+module = ["verifiers", "verifiers.*"]
+follow_imports = "skip"
+ignore_missing_imports = true
+
+[[tool.mypy.overrides]]
+module = ["desktop_env", "desktop_env.*"]
+ignore_missing_imports = true
+
+[[tool.mypy.overrides]]
+module = ["msgpack", "msgpack.*"]
+ignore_missing_imports = true

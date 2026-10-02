@@ -1,0 +1,92 @@
+# PrimeRL/vLLM config for an OSWorld Slurm run.
+# Template for scripts/render_prime_rl_fleet_config.py. Do not launch it directly:
+# the renderer injects the external fleet gateway address and absolute task paths.
+
+output_dir = "outputs/osworld_qwen"
+max_steps = 250
+seq_len = 8192
+
+[model]
+name = "Qwen/Qwen3.5-9B"
+
+[model.vlm]
+vision_encoder_attr = "model.visual"
+language_model_attr = "model.language_model"
+
+[wandb]
+project = "osworld-rl"
+name = "berlin-training-run-2026-07-03"
+group = "third-big-training-run-2026-07-03"
+
+[ckpt]
+interval = 1
+keep_last = 1
+
+[deployment]
+type = "single_node"
+gpus_per_node = 4
+num_train_gpus = 2
+num_infer_gpus = 2
+
+[slurm]
+job_name = "rl_osworld"
+time = "24:00:00"
+template_path = "sbatch/prime_rl_single_node.sbatch.j2"
+
+[trainer]
+
+[trainer.model]
+impl = "custom"
+optimization_dtype = "bfloat16"
+reduce_dtype = "bfloat16"
+fused_lm_head_token_chunk_size = 1024
+
+[trainer.model.lora]
+rank = 8
+
+[trainer.model.ac]
+mode = "full"
+freq = 1
+
+[trainer.optim]
+lr = 1e-6
+weight_decay = 0.0
+
+[orchestrator]
+batch_size = 32
+group_size = 16
+max_inflight_rollouts = 64
+collect_inference_metrics = false
+
+[orchestrator.renderer]
+name = "qwen3.5"
+enable_thinking = false
+image_cache_max = 5
+
+[orchestrator.train.sampling]
+temperature = 1.0
+max_completion_tokens = 512
+
+[[orchestrator.train.env]]
+name = "osworld-target-box"
+taskset = { id = "rl", base_path = ".", shuffle_seed = 0 }
+harness = { id = "rl", max_steps = 10, desktop = { desktop_pool_config = { min_ready_sessions = 0 } } }
+timeout = { rollout = 1000 }
+retries = { rollout = { max_retries = 2 } }
+max_turns = 10
+
+[inference]
+gpu_memory_utilization = 0.85
+
+[inference.server]
+port = 8000
+advertise = true
+
+[inference.model]
+max_model_len = 8192
+
+[inference.parallel]
+# Use one tensor-parallel vLLM replica across the whole 4-GPU inference node.
+# PrimeRL auto-expands dp to gpus_per_node / tp when tp leaves spare GPUs
+tp = 1
+dp = 2

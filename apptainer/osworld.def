@@ -1,0 +1,288 @@
+Bootstrap: docker
+From: ubuntu:22.04
+
+%labels
+    Description OSWorld qcow2 runtime for Apptainer using QEMU user networking
+
+%help
+    This image boots an OSWorld Ubuntu.qcow2 with QEMU and exposes the guest
+    services expected by OSWorld DesktopEnv:
+
+      - SERVER_PORT   host -> guest :5000   OSWorld Flask control server
+      - CHROMIUM_PORT host -> guest :9222   Chrome remote debugging
+      - VLC_PORT      host -> guest :8080   VLC HTTP interface
+      - VNC_PORT      host noVNC web UI -> QEMU VNC
+
+    The qcow2 must be mounted at /System.qcow2. The OSWorld ApptainerProvider
+    does this automatically by binding path_to_vm to /System.qcow2:ro.
+
+    Useful runtime variables:
+      DISK_SIZE=        optional; empty means keep the qcow2 virtual size
+      RAM_SIZE=4G
+      CPU_CORES=4
+      KVM=Y|N
+      SERVER_PORT=5000
+      CHROMIUM_PORT=9222
+      VNC_PORT=8006
+      VLC_PORT=8080
+      READY_TIMEOUT=300
+      QEMU_VNC_PORT=5901
+      OSWORLD_WORKDIR=/tmp/osworld-qemu-$USER
+      OSWORLD_QEMU_READY_SNAPSHOT=1
+      OSWORLD_QEMU_SNAPSHOT_NAME=osworld_ready
+      OSWORLD_QEMU_SNAPSHOT_TIMEOUT=600
+      OSWORLD_QEMU_SNAPSHOT_STRICT=0
+
+%post
+    set -eux
+
+    export DEBIAN_FRONTEND=noninteractive
+    apt-get update
+    apt-get install -y --no-install-recommends \
+        bash \
+        ca-certificates \
+        coreutils \
+        curl \
+        iproute2 \
+        netcat-openbsd \
+        novnc \
+        ovmf \
+        procps \
+        python3 \
+        qemu-system-x86 \
+        qemu-utils \
+        seabios \
+        websockify
+
+    apt-get clean
+    rm -rf /var/lib/apt/lists/*
+
+    cat > /usr/local/bin/qemu-monitor-command <<'PY'
+#!/usr/bin/env python3
+from __future__ import annotations
+
+import os
+import socket
+import sys
+import time
+
+
+PROMPT = b"(qemu)"
+
+
+def read_until_prompt(sock: socket.socket, deadline: float) -> bytes:
+    chunks: list[bytes] = []
+    while True:
+        remaining = deadline - time.monotonic()
+        if remaining <= 0:
+            raise TimeoutError("timed out waiting for QEMU monitor prompt")
+        sock.settimeout(min(1.0, remaining))
+        try:
+            chunk = sock.recv(4096)
+        except TimeoutError:
+            continue
+        if not chunk:
+            break
+        chunks.append(chunk)
+        if b"".join(chunks).rstrip().endswith(PROMPT):
+            break
+    return b"".join(chunks)
+
+
+def main() -> int:
+    if len(sys.argv) < 3:
+        print("usage: qemu-monitor-command SOCKET COMMAND...", file=sys.stderr)
+        return 2
+    socket_path = sys.argv[1]
+    command = " ".join(sys.argv[2:])
+    timeout = float(os.environ.get("OSWORLD_QEMU_SNAPSHOT_TIMEOUT", "600"))
+    deadline = time.monotonic() + timeout
+    with socket.socket(socket.AF_UNIX, socket.SOCK_STREAM) as sock:
+        sock.connect(socket_path)
+        read_until_prompt(sock, deadline)
+        sock.sendall(command.encode("utf-8") + b"\n")
+        output = read_until_prompt(sock, deadline)
+    sys.stdout.buffer.write(output)
+    return 0
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())
+PY
+    chmod 0755 /usr/local/bin/qemu-monitor-command
+
+    cat > /usr/local/bin/osworld-qemu-entrypoint <<'SCRIPT'
+#!/usr/bin/env bash
+set -Eeuo pipefail
+
+BASE_IMAGE="${OSWORLD_QCOW2:-/System.qcow2}"
+if [[ ! -f "${BASE_IMAGE}" ]]; then
+    echo "ERROR: qcow2 image not found at ${BASE_IMAGE}" >&2
+    echo "Bind your OSWorld Ubuntu.qcow2 to /System.qcow2." >&2
+    exit 2
+fi
+
+DISK_SIZE="${DISK_SIZE:-}"
+RAM_SIZE="${RAM_SIZE:-4G}"
+CPU_CORES="${CPU_CORES:-4}"
+SERVER_PORT="${SERVER_PORT:-5000}"
+CHROMIUM_PORT="${CHROMIUM_PORT:-9222}"
+VNC_PORT="${VNC_PORT:-8006}"
+VLC_PORT="${VLC_PORT:-8080}"
+READY_TIMEOUT="${READY_TIMEOUT:-300}"
+QEMU_VNC_PORT="${QEMU_VNC_PORT:-5901}"
+QEMU_VNC_DISPLAY="$((QEMU_VNC_PORT - 5900))"
+
+if (( QEMU_VNC_DISPLAY < 0 )); then
+    echo "ERROR: QEMU_VNC_PORT must be >= 5900, got ${QEMU_VNC_PORT}" >&2
+    exit 2
+fi
+
+WORKDIR="${OSWORLD_WORKDIR:-${TMPDIR:?TMPDIR must be set by Slurm}/osworld-qemu-${SLURM_JOB_ID:?SLURM_JOB_ID must be set by Slurm}}"
+mkdir -p "${WORKDIR}"
+LOGDIR="${OSWORLD_LOG_DIR:-${WORKDIR}}"
+mkdir -p "${LOGDIR}"
+OVERLAY="${WORKDIR}/System.overlay.qcow2"
+QEMU_LOG="${LOGDIR}/qemu.log"
+NOVNC_LOG="${LOGDIR}/novnc.log"
+MONITOR="${WORKDIR}/qemu-monitor.sock"
+SNAPSHOT_OK="${WORKDIR}/ready-snapshot.ok"
+SNAPSHOT_FAILED="${WORKDIR}/ready-snapshot.failed"
+SNAPSHOT_LOG="${LOGDIR}/ready-snapshot.log"
+
+truthy() {
+    case "${1:-}" in
+        1|true|TRUE|yes|YES|y|Y|on|ON) return 0 ;;
+        *) return 1 ;;
+    esac
+}
+
+cleanup() {
+    trap - EXIT INT TERM
+    if [[ -n "${NOVNC_PID:-}" ]] && kill -0 "${NOVNC_PID}" 2>/dev/null; then
+        kill "${NOVNC_PID}" 2>/dev/null || true
+        wait "${NOVNC_PID}" 2>/dev/null || true
+    fi
+    if [[ -n "${QEMU_PID:-}" ]] && kill -0 "${QEMU_PID}" 2>/dev/null; then
+        kill "${QEMU_PID}" 2>/dev/null || true
+        sleep 2
+        if kill -0 "${QEMU_PID}" 2>/dev/null; then
+            kill -9 "${QEMU_PID}" 2>/dev/null || true
+        fi
+        wait "${QEMU_PID}" 2>/dev/null || true
+    fi
+    rm -rf "${WORKDIR}"
+}
+trap cleanup EXIT INT TERM
+
+rm -f "${MONITOR}" "${SNAPSHOT_OK}" "${SNAPSHOT_FAILED}" "${SNAPSHOT_LOG}"
+qemu-img create -q -f qcow2 -F qcow2 -b "${BASE_IMAGE}" "${OVERLAY}"
+if [[ -n "${DISK_SIZE}" ]]; then
+    qemu-img resize "${OVERLAY}" "${DISK_SIZE}" >/dev/null
+fi
+
+QEMU_ACCEL_ARGS=()
+if [[ "${KVM:-Y}" != "N" && -e /dev/kvm ]]; then
+    QEMU_ACCEL_ARGS=(-enable-kvm -cpu host)
+    echo "Using KVM acceleration"
+else
+    QEMU_ACCEL_ARGS=(-machine accel=tcg -cpu max)
+    echo "Using QEMU TCG emulation; this will be much slower"
+fi
+
+websockify \
+    --web=/usr/share/novnc/ \
+    "0.0.0.0:${VNC_PORT}" \
+    "127.0.0.1:${QEMU_VNC_PORT}" \
+    >"${NOVNC_LOG}" 2>&1 &
+NOVNC_PID=$!
+sleep 1
+if ! kill -0 "${NOVNC_PID}" 2>/dev/null; then
+    echo "ERROR: websockify/noVNC exited during startup" >&2
+    cat "${NOVNC_LOG}" >&2 || true
+    exit 1
+fi
+
+qemu-system-x86_64 \
+    "${QEMU_ACCEL_ARGS[@]}" \
+    -m "${RAM_SIZE}" \
+    -smp "${CPU_CORES}" \
+    -drive "file=${OVERLAY},format=qcow2,if=virtio,cache=writeback,discard=unmap" \
+    -netdev "user,id=net0,hostfwd=tcp:0.0.0.0:${SERVER_PORT}-:5000,hostfwd=tcp:0.0.0.0:${CHROMIUM_PORT}-:9222,hostfwd=tcp:0.0.0.0:${VLC_PORT}-:8080" \
+    -device virtio-net-pci,netdev=net0 \
+    -device virtio-vga \
+    -display none \
+    -vnc "127.0.0.1:${QEMU_VNC_DISPLAY}" \
+    -monitor "unix:${MONITOR},server,nowait" \
+    -serial stdio \
+    >"${QEMU_LOG}" 2>&1 &
+QEMU_PID=$!
+
+echo "QEMU pid: ${QEMU_PID}"
+echo "QEMU log: ${QEMU_LOG}"
+echo "QEMU monitor: ${MONITOR}"
+echo "noVNC: http://127.0.0.1:${VNC_PORT}/vnc.html"
+echo "OSWorld server: http://127.0.0.1:${SERVER_PORT}"
+
+STARTED_AT="$(date +%s)"
+until curl -fsS "http://127.0.0.1:${SERVER_PORT}/screenshot" >/dev/null 2>&1; do
+    if ! kill -0 "${QEMU_PID}" 2>/dev/null; then
+        echo "ERROR: QEMU exited before OSWorld server became ready" >&2
+        cat "${QEMU_LOG}" >&2 || true
+        exit 1
+    fi
+    NOW="$(date +%s)"
+    if (( NOW - STARTED_AT > READY_TIMEOUT )); then
+        echo "ERROR: OSWorld server did not become ready within ${READY_TIMEOUT}s" >&2
+        echo "Last QEMU log lines:" >&2
+        tail -n 80 "${QEMU_LOG}" >&2 || true
+        exit 1
+    fi
+    echo "Waiting for OSWorld server on port ${SERVER_PORT}..."
+    sleep 3
+done
+
+if truthy "${OSWORLD_QEMU_READY_SNAPSHOT:-0}"; then
+    SNAPSHOT_NAME="${OSWORLD_QEMU_SNAPSHOT_NAME:-osworld_ready}"
+    SNAPSHOT_TIMEOUT="${OSWORLD_QEMU_SNAPSHOT_TIMEOUT:-600}"
+    echo "Saving QEMU ready snapshot: ${SNAPSHOT_NAME}"
+    if timeout "${SNAPSHOT_TIMEOUT}" \
+        qemu-monitor-command "${MONITOR}" "savevm ${SNAPSHOT_NAME}" \
+        >"${SNAPSHOT_LOG}" 2>&1 \
+        && timeout 30 \
+        qemu-monitor-command "${MONITOR}" "info snapshots" \
+        >>"${SNAPSHOT_LOG}" 2>&1 \
+        && grep -q "${SNAPSHOT_NAME}" "${SNAPSHOT_LOG}"; then
+        printf '%s\n' "${SNAPSHOT_NAME}" >"${SNAPSHOT_OK}"
+        echo "QEMU ready snapshot saved: ${SNAPSHOT_NAME}"
+    else
+        {
+            echo "Failed to save QEMU ready snapshot: ${SNAPSHOT_NAME}"
+            echo "Snapshot log:"
+            cat "${SNAPSHOT_LOG}" 2>/dev/null || true
+        } >"${SNAPSHOT_FAILED}"
+        cat "${SNAPSHOT_FAILED}" >&2
+        if truthy "${OSWORLD_QEMU_SNAPSHOT_STRICT:-0}"; then
+            exit 1
+        fi
+    fi
+fi
+
+echo "OSWorld VM is ready"
+wait "${QEMU_PID}"
+SCRIPT
+
+    chmod 0755 /usr/local/bin/osworld-qemu-entrypoint
+
+%environment
+    export LC_ALL=C.UTF-8
+    export LANG=C.UTF-8
+
+%runscript
+    exec /usr/local/bin/osworld-qemu-entrypoint "$@"
+
+%test
+    qemu-system-x86_64 --version >/dev/null
+    qemu-img --version >/dev/null
+    test -x /usr/local/bin/qemu-monitor-command
+    websockify --help >/dev/null

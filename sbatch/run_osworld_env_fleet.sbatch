@@ -1,0 +1,191 @@
+#!/usr/bin/env bash
+#SBATCH --job-name=osworld_env_fleet
+#SBATCH --ntasks-per-node=1
+#SBATCH --cpus-per-task=16
+#SBATCH --mem=64G
+#SBATCH --output=slurm-%x.%j.out
+#SBATCH --error=slurm-%x.%j.out
+
+# Override Slurm resources with sbatch flags or SBATCH_* environment variables,
+# e.g. `sbatch --nodes=2 --time=04:00:00 ...`.
+set -euo pipefail
+
+ROOT_DIR="${ROOT_DIR:-${SLURM_SUBMIT_DIR:-$(pwd -P)}}"
+cd "$ROOT_DIR"
+
+export RL_CLUSTER_WORKLOAD=osworld
+if [[ -n "${CLUSTER_SETUP_SCRIPT:-}" ]]; then
+  # shellcheck source=/dev/null
+  source "$CLUSTER_SETUP_SCRIPT"
+fi
+
+PRIME_RL_DIR="${PRIME_RL_DIR:-$ROOT_DIR/deps/prime-rl}"
+PYTHON="${PYTHON:-$ROOT_DIR/.venv/bin/python}"
+ENV_SERVER_BIN="${ENV_SERVER_BIN:-$PRIME_RL_DIR/.venv/bin/env-server}"
+
+export SCRATCH="${SCRATCH:-$ROOT_DIR/.scratch}"
+
+export ROOT_DIR PYTHON ENV_SERVER_BIN
+export OSWORLD_FLEET_RUN_ID="${OSWORLD_FLEET_RUN_ID:-${SLURM_JOB_ID:-manual}}"
+export OSWORLD_RUN_BASE="${OSWORLD_RUN_BASE:-$SCRATCH}"
+export OSWORLD_FLEET_RUN_ROOT="${OSWORLD_FLEET_RUN_ROOT:-$OSWORLD_RUN_BASE/$OSWORLD_FLEET_RUN_ID/env_fleet}"
+export OSWORLD_ENV_FLEET_REGISTRY="${OSWORLD_ENV_FLEET_REGISTRY:-$OSWORLD_FLEET_RUN_ROOT/env_registry.json}"
+export XDG_CACHE_HOME="${XDG_CACHE_HOME:-$SCRATCH/.cache}"
+export UV_CACHE_DIR="${UV_CACHE_DIR:-$SCRATCH/.cache/uv}"
+export HF_HOME="${HF_HOME:-$SCRATCH/huggingface}"
+export HF_HUB_CACHE="${HF_HUB_CACHE:-$HF_HOME/hub}"
+export HF_HUB_OFFLINE="${HF_HUB_OFFLINE:-1}"
+export TRANSFORMERS_OFFLINE="${TRANSFORMERS_OFFLINE:-1}"
+export HF_DATASETS_OFFLINE="${HF_DATASETS_OFFLINE:-1}"
+export WANDB_DIR="${WANDB_DIR:-$SCRATCH/wandb}"
+export PYTHONNOUSERSITE=1
+export PYTHONPATH="$ROOT_DIR:${PYTHONPATH:-}"
+export UV_NO_SYNC=1
+
+export OSWORLD_ENV_SERVERS_PER_NODE="${OSWORLD_ENV_SERVERS_PER_NODE:-1}"
+export OSWORLD_ENV_WORKERS_PER_SERVER="${OSWORLD_ENV_WORKERS_PER_SERVER:-4}"
+export OSWORLD_FLEET_BASE_PORT="${OSWORLD_FLEET_BASE_PORT:-5200}"
+export OSWORLD_MAX_TASKS="${OSWORLD_MAX_TASKS:-0}"
+export OSWORLD_ROLLOUT_TIMEOUT="${OSWORLD_ROLLOUT_TIMEOUT:-900}"
+export OSWORLD_ENV_MAX_RETRIES="${OSWORLD_ENV_MAX_RETRIES:-2}"
+export OSWORLD_DESKTOP_POOL_LEASE_TIMEOUT="${OSWORLD_DESKTOP_POOL_LEASE_TIMEOUT:-300}"
+export OSWORLD_DESKTOP_POOL_STARTUP_TIMEOUT="${OSWORLD_DESKTOP_POOL_STARTUP_TIMEOUT:-840}"
+export OSWORLD_DESKTOP_POOL_ROOT="${OSWORLD_DESKTOP_POOL_ROOT:-$OSWORLD_RUN_BASE/$OSWORLD_FLEET_RUN_ID/pool}"
+export OSWORLD_DESKTOP_POOL_STATUS_DIR="${OSWORLD_DESKTOP_POOL_STATUS_DIR:-$OSWORLD_DESKTOP_POOL_ROOT/status}"
+OSWORLD_DESKTOP_POOL_TMP_ROOT="${TMPDIR:?TMPDIR must be set by Slurm}/osworld-${SLURM_JOB_ID:-${USER:-user}-${OSWORLD_FLEET_RUN_ID:-manual}}"
+export OSWORLD_DESKTOP_POOL_RUNTIME_DIR="${OSWORLD_DESKTOP_POOL_RUNTIME_DIR:-$OSWORLD_DESKTOP_POOL_TMP_ROOT/runtime}"
+export OSWORLD_DESKTOP_POOL_LOG_RUNTIME_DIR="${OSWORLD_DESKTOP_POOL_LOG_RUNTIME_DIR:-$OSWORLD_DESKTOP_POOL_TMP_ROOT/log}"
+export OSWORLD_FLEET_CONFIGS_DIR="${OSWORLD_FLEET_CONFIGS_DIR:-$OSWORLD_FLEET_RUN_ROOT/configs}"
+export OSWORLD_FLEET_LOGS_DIR="${OSWORLD_FLEET_LOGS_DIR:-$OSWORLD_FLEET_RUN_ROOT/logs}"
+export OSWORLD_SUPERVISOR_POLL_S="${OSWORLD_SUPERVISOR_POLL_S:-5}"
+export OSWORLD_SUPERVISOR_STARTUP_GRACE_S="${OSWORLD_SUPERVISOR_STARTUP_GRACE_S:-900}"
+export OSWORLD_SUPERVISOR_REPLICA_UNHEALTHY_S="${OSWORLD_SUPERVISOR_REPLICA_UNHEALTHY_S:-120}"
+export OSWORLD_SUPERVISOR_FAILURE_WINDOW_S="${OSWORLD_SUPERVISOR_FAILURE_WINDOW_S:-300}"
+export OSWORLD_SUPERVISOR_MAX_FAILURES_PER_WINDOW="${OSWORLD_SUPERVISOR_MAX_FAILURES_PER_WINDOW:-8}"
+export OSWORLD_SUPERVISOR_RESTART_BACKOFF_S="${OSWORLD_SUPERVISOR_RESTART_BACKOFF_S:-10}"
+export OSWORLD_SUPERVISOR_FLEET_UNHEALTHY_S="${OSWORLD_SUPERVISOR_FLEET_UNHEALTHY_S:-300}"
+export OSWORLD_SUPERVISOR_MAX_FLEET_RESTARTS="${OSWORLD_SUPERVISOR_MAX_FLEET_RESTARTS:-3}"
+export OSWORLD_GATEWAY_REQUEST_TIMEOUT_S="${OSWORLD_GATEWAY_REQUEST_TIMEOUT_S:-$OSWORLD_ROLLOUT_TIMEOUT}"
+export OSWORLD_GATEWAY_BACKEND_QUARANTINE_S="${OSWORLD_GATEWAY_BACKEND_QUARANTINE_S:-30}"
+export OSWORLD_GATEWAY_CAPACITY_CHECK_INTERVAL="${OSWORLD_GATEWAY_CAPACITY_CHECK_INTERVAL:-5}"
+export OSWORLD_STATUS_STALE_AFTER_S="${OSWORLD_STATUS_STALE_AFTER_S:-120}"
+export OSWORLD_DESKTOP_POOL_STARTUP_RETRY_BACKOFF_MAX="${OSWORLD_DESKTOP_POOL_STARTUP_RETRY_BACKOFF_MAX:-300}"
+export OSWORLD_DESKTOP_POOL_STATUS_HEARTBEAT_INTERVAL="${OSWORLD_DESKTOP_POOL_STATUS_HEARTBEAT_INTERVAL:-10}"
+
+export OSWORLD_FLEET_ALLOCATED_NODES="${OSWORLD_FLEET_ALLOCATED_NODES:-${SLURM_NNODES:-${SLURM_JOB_NUM_NODES:-1}}}"
+SRUN_SCOPE=()
+if [[ -n "${OSWORLD_SLURM_HET_GROUP:-}" ]]; then
+  SRUN_SCOPE+=("--het-group=$OSWORLD_SLURM_HET_GROUP")
+fi
+
+mkdir -p \
+  "$OSWORLD_FLEET_RUN_ROOT" \
+  "$OSWORLD_DESKTOP_POOL_ROOT" \
+  "$XDG_CACHE_HOME" \
+  "$UV_CACHE_DIR" \
+  "$HF_HOME" \
+  "$HF_HUB_CACHE" \
+  "$WANDB_DIR" \
+  "$SCRATCH/logs"
+
+for required in "$PYTHON" "$ENV_SERVER_BIN"; do
+  if [[ ! -e "$required" ]]; then
+    echo "ERROR: required path is missing: $required" >&2
+    exit 127
+  fi
+done
+
+echo "Job started: $(date --iso-8601=seconds)"
+echo "Host: $(hostname)"
+echo "Root: $ROOT_DIR"
+echo "Scratch: $SCRATCH"
+echo "HF_HOME: $HF_HOME"
+echo "HF_HUB_CACHE: $HF_HUB_CACHE"
+echo "HF_HUB_OFFLINE: $HF_HUB_OFFLINE"
+echo "Slurm job id: ${SLURM_JOB_ID:-manual}"
+echo "Slurm nodes: $OSWORLD_FLEET_ALLOCATED_NODES"
+echo "Slurm heterogeneous group: ${OSWORLD_SLURM_HET_GROUP:-standalone}"
+echo "Slurm cpus per task: ${SLURM_CPUS_PER_TASK:-unknown}"
+if [[ -n "${SLURM_JOB_ID:-}" ]]; then
+  echo "Slurm TRES/request summary:"
+  scontrol show job "$SLURM_JOB_ID" | tr ' ' '\n' | grep -E '^(ReqTRES|AllocTRES|TRES|NumNodes|NumCPUs)=' || true
+fi
+echo "Fleet root: $OSWORLD_FLEET_RUN_ROOT"
+echo "Fleet registry: $OSWORLD_ENV_FLEET_REGISTRY"
+echo "Fleet configs: $OSWORLD_FLEET_CONFIGS_DIR"
+echo "Fleet logs: $OSWORLD_FLEET_LOGS_DIR"
+echo "Env servers per node: $OSWORLD_ENV_SERVERS_PER_NODE"
+echo "Workers per server: $OSWORLD_ENV_WORKERS_PER_SERVER"
+echo "Max tasks: $OSWORLD_MAX_TASKS"
+echo "Rollout timeout: $OSWORLD_ROLLOUT_TIMEOUT"
+echo "Env max retries: $OSWORLD_ENV_MAX_RETRIES"
+echo "Desktop pool min ready sessions: ${OSWORLD_DESKTOP_POOL_MIN_READY_SESSIONS:-1}"
+echo "Desktop pool max sessions: ${OSWORLD_DESKTOP_POOL_MAX_SESSIONS:-1}"
+echo "Desktop pool max rollouts per session: ${OSWORLD_DESKTOP_POOL_MAX_ROLLOUTS_PER_SESSION:-1}"
+echo "Desktop pool lease timeout: $OSWORLD_DESKTOP_POOL_LEASE_TIMEOUT"
+echo "Desktop pool startup timeout: $OSWORLD_DESKTOP_POOL_STARTUP_TIMEOUT"
+echo "Desktop pool startup retry backoff max: $OSWORLD_DESKTOP_POOL_STARTUP_RETRY_BACKOFF_MAX"
+echo "Desktop pool status heartbeat interval: $OSWORLD_DESKTOP_POOL_STATUS_HEARTBEAT_INTERVAL"
+echo "Desktop pool root: $OSWORLD_DESKTOP_POOL_ROOT"
+echo "Desktop pool status: $OSWORLD_DESKTOP_POOL_STATUS_DIR"
+echo "Desktop pool runtime: $OSWORLD_DESKTOP_POOL_RUNTIME_DIR"
+echo "Desktop pool log runtime: $OSWORLD_DESKTOP_POOL_LOG_RUNTIME_DIR -> $OSWORLD_DESKTOP_POOL_ROOT/logs"
+echo "Supervisor max fleet restarts: $OSWORLD_SUPERVISOR_MAX_FLEET_RESTARTS"
+echo "Gateway request timeout: $OSWORLD_GATEWAY_REQUEST_TIMEOUT_S"
+echo "Status stale after: $OSWORLD_STATUS_STALE_AFTER_S"
+
+srun "${SRUN_SCOPE[@]}" \
+  --kill-on-bad-exit=1 \
+  --nodes="$OSWORLD_FLEET_ALLOCATED_NODES" \
+  --ntasks="$OSWORLD_FLEET_ALLOCATED_NODES" \
+  --ntasks-per-node=1 \
+  bash -c '
+  set -euo pipefail
+
+  cd "$ROOT_DIR"
+  NODE_RANK="${SLURM_PROCID:-0}"
+  TOTAL_REPLICAS="${OSWORLD_ENV_REPLICA_COUNT:-$((OSWORLD_FLEET_ALLOCATED_NODES * OSWORLD_ENV_SERVERS_PER_NODE))}"
+  REPLICA_BASE_OFFSET="${OSWORLD_ENV_REPLICA_OFFSET:-0}"
+  REPLICA_OFFSET=$((REPLICA_BASE_OFFSET + NODE_RANK * OSWORLD_ENV_SERVERS_PER_NODE))
+
+  mkdir -p "$OSWORLD_DESKTOP_POOL_RUNTIME_DIR"
+  echo "Desktop pool runtime: $OSWORLD_DESKTOP_POOL_RUNTIME_DIR -> $(readlink -f "$OSWORLD_DESKTOP_POOL_RUNTIME_DIR")"
+
+  "$PYTHON" scripts/prepare_env_fleet.py \
+    --node-rank "$NODE_RANK" \
+    --replica-count "$TOTAL_REPLICAS" \
+    --replica-offset "$REPLICA_OFFSET"
+
+  CONFIG_DIR="$OSWORLD_FLEET_CONFIGS_DIR/node_$(printf "%04d" "$NODE_RANK")"
+  LOG_DIR="$OSWORLD_FLEET_LOGS_DIR/node_$(printf "%04d" "$NODE_RANK")"
+  SUPERVISOR_ARGS=(
+    --config-dir "$CONFIG_DIR"
+    --logs-dir "$LOG_DIR"
+    --registry "$OSWORLD_ENV_FLEET_REGISTRY"
+    --env-server-bin "$ENV_SERVER_BIN"
+    --python "$PYTHON"
+    --run-root "$OSWORLD_FLEET_RUN_ROOT"
+    --poll-s "$OSWORLD_SUPERVISOR_POLL_S"
+    --startup-grace-s "$OSWORLD_SUPERVISOR_STARTUP_GRACE_S"
+    --replica-unhealthy-s "$OSWORLD_SUPERVISOR_REPLICA_UNHEALTHY_S"
+    --failure-window-s "$OSWORLD_SUPERVISOR_FAILURE_WINDOW_S"
+    --max-failures-per-window "$OSWORLD_SUPERVISOR_MAX_FAILURES_PER_WINDOW"
+    --restart-backoff-s "$OSWORLD_SUPERVISOR_RESTART_BACKOFF_S"
+    --fleet-unhealthy-s "$OSWORLD_SUPERVISOR_FLEET_UNHEALTHY_S"
+    --max-fleet-restarts "$OSWORLD_SUPERVISOR_MAX_FLEET_RESTARTS"
+    --status-stale-after-s "$OSWORLD_STATUS_STALE_AFTER_S"
+    --gateway-request-timeout-s "$OSWORLD_GATEWAY_REQUEST_TIMEOUT_S"
+    --gateway-backend-quarantine-s "$OSWORLD_GATEWAY_BACKEND_QUARANTINE_S"
+    --gateway-capacity-check-interval "$OSWORLD_GATEWAY_CAPACITY_CHECK_INTERVAL"
+  )
+
+  if [[ "$NODE_RANK" -eq 0 ]]; then
+    SUPERVISOR_ARGS+=(
+      --start-gateway
+      --gateway-log "$OSWORLD_FLEET_LOGS_DIR/rollout-gateway.stdout.log"
+    )
+  fi
+
+  echo "Starting OSWorld env fleet supervisor for node rank $NODE_RANK"
+  "$PYTHON" scripts/supervise_osworld_env_fleet.py "${SUPERVISOR_ARGS[@]}"
+'

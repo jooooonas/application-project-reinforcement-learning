@@ -1,0 +1,6 @@
+[submodule "prime-rl"]
+	path = deps/prime-rl
+	url = https://github.com/p-doom/prime-rl.git
+[submodule "OSWorldRL"]
+	path = deps/OSWorldRL
+	url = https://github.com/p-doom/OSWorldRL.git

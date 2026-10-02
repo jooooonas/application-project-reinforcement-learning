@@ -1,0 +1,36 @@
+name: Build OSWorld SIF
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  build-osworld-sif:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 120
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v7
+
+      - name: Set up Apptainer
+        uses: eWaterCycle/setup-apptainer@v2
+        with:
+          apptainer-version: "1.3.6"
+
+      - name: Build osworld.sif
+        run: |
+          set -euo pipefail
+          APPTAINER_BIN="$(command -v apptainer)"
+          "$APPTAINER_BIN" --version
+          sudo -E "$APPTAINER_BIN" build osworld.sif apptainer/osworld.def
+          "$APPTAINER_BIN" inspect osworld.sif
+
+      - name: Upload osworld-sif artifact
+        uses: actions/upload-artifact@v5
+        with:
+          name: osworld-sif
+          path: osworld.sif
+          if-no-files-found: error

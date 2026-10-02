@@ -1,0 +1,56 @@
+# Python bytecode and test caches
+__pycache__/
+*.py[cod]
+*$py.class
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.coverage
+coverage.xml
+htmlcov/
+
+# Virtual environments and local interpreter state
+.venv/
+venv/
+env/
+.python-version
+
+# Local environment files
+.env
+.env.*
+!.env.example
+
+# Build and packaging output
+build/
+dist/
+*.egg-info/
+
+# Project caches, downloaded data, and generated artifacts
+/cache/
+/datasets/
+/artifacts/
+/outputs/
+/runs/
+/logs/
+experiments/synthetic_box_prompt_lab_output/
+wandb/
+
+# Slurm and runtime logs
+*.out
+*.err
+*.log
+slurm-*.out
+
+# Large OSWorld/container/VM assets
+*.sif
+*.simg
+*.qcow2
+*.img
+*.iso
+
+# Common editor and system files
+.DS_Store
+.idea/
+.vscode/
+*.swp
+*.swo
